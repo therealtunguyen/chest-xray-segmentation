@@ -19,7 +19,7 @@ from utils import SegmentationAugmentation
 # Dataset
 # ==============================================================================
 class ChestXRaySegmentationDataset(Dataset):
-    """Dataset for chest X-ray semantic segmentation"""
+    """Dataset for chest X-ray binary lung segmentation"""
 
     def __init__(
         self,
@@ -27,7 +27,7 @@ class ChestXRaySegmentationDataset(Dataset):
         mask_dir: str,
         transform: Optional[callable] = None,
         image_size: Tuple[int, int] = (512, 512),
-        num_classes: int = 4
+        num_classes: int = 2
     ):
         self.image_dir = Path(image_dir)
         self.mask_dir = Path(mask_dir)
@@ -61,7 +61,11 @@ class ChestXRaySegmentationDataset(Dataset):
 
         # Normalize image to [0, 1]
         image = image.astype(np.float32) / 255.0
-        mask = np.clip(mask, 0, self.num_classes - 1)
+
+        # Convert grayscale mask (0-255) to binary class labels (0-1)
+        # 0=background, 1=lungs
+        mask_binary = (mask > 127).astype(np.uint8)  # 0 or 1
+        mask = mask_binary
 
         # Apply augmentation if transform is provided
         if self.transform:
@@ -97,7 +101,7 @@ class UNetBlock(nn.Module):
 
 class StandardUNet(nn.Module):
     """
-    Standard U-Net implementation without any edge enhancement.
+    Standard U-Net implementation for binary lung segmentation.
     - Encoder: 4 levels with max pooling
     - Decoder: 4 levels with transposed convolutions
     - Skip connections via concatenation
@@ -106,7 +110,7 @@ class StandardUNet(nn.Module):
     def __init__(
         self,
         in_channels: int = 1,
-        num_classes: int = 4,
+        num_classes: int = 2,
         features: List[int] = [64, 128, 256, 512]
     ):
         super().__init__()
@@ -243,6 +247,72 @@ def calculate_metrics(pred: torch.Tensor, target: torch.Tensor, num_classes: int
     }
 
 
+def calculate_per_class_metrics(pred: torch.Tensor, target: torch.Tensor, num_classes: int,
+                                class_names: List[str] = None, smooth: float = 1e-6) -> Dict:
+    """Calculate both overall and per-class segmentation metrics for PyTorch tensors"""
+    if class_names is None:
+        class_names = ["Background", "Lungs"]
+
+    pred_softmax = torch.softmax(pred, dim=1)
+    pred_argmax = torch.argmax(pred_softmax, dim=1)
+    target_squeezed = target.squeeze(1).long()
+
+    # Pixel Accuracy
+    correct = (pred_argmax == target_squeezed).long().sum()
+    total = target_squeezed.numel()
+    pixel_acc = (correct.float() / total).item()
+
+    # Per-class metrics storage
+    per_class_metrics = {}
+    dice_scores = []
+    iou_scores = []
+    sensitivities = []
+    specificities = []
+
+    for cls in range(num_classes):
+        pred_cls = (pred_argmax == cls).float()
+        target_cls = (target_squeezed == cls).float()
+
+        tp = (pred_cls * target_cls).sum()
+        fp = (pred_cls * (1 - target_cls)).sum()
+        fn = ((1 - pred_cls) * target_cls).sum()
+        tn = ((1 - pred_cls) * (1 - target_cls)).sum()
+
+        dice = (2. * tp + smooth) / (2. * tp + fp + fn + smooth)
+        iou = (tp + smooth) / (tp + fp + fn + smooth)
+        sensitivity = (tp + smooth) / (tp + fn + smooth)
+        specificity = (tn + smooth) / (tn + fp + smooth)
+
+        dice_scores.append(dice.item())
+        iou_scores.append(iou.item())
+        sensitivities.append(sensitivity.item())
+        specificities.append(specificity.item())
+
+        # Store per-class metrics
+        class_name = class_names[cls] if cls < len(
+            class_names) else f"Class_{cls}"
+        per_class_metrics[class_name] = {
+            'dice': float(dice.item()),
+            'iou': float(iou.item()),
+            'sensitivity': float(sensitivity.item()),
+            'specificity': float(specificity.item())
+        }
+
+    # Overall metrics
+    overall_metrics = {
+        'dice': float(np.mean(dice_scores)),
+        'iou': float(np.mean(iou_scores)),
+        'pixel_acc': float(pixel_acc),
+        'sensitivity': float(np.mean(sensitivities)),
+        'specificity': float(np.mean(specificities))
+    }
+
+    return {
+        'overall': overall_metrics,
+        'per_class': per_class_metrics
+    }
+
+
 # ==============================================================================
 # Trainer
 # ==============================================================================
@@ -267,7 +337,7 @@ class Trainer:
         self.num_epochs = num_epochs
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True, parents=True)
-        self.num_classes = 4
+        self.num_classes = 2
 
         self.history = {
             'train_loss': [], 'val_loss': [],
@@ -387,7 +457,7 @@ if __name__ == "__main__":
         raise ValueError(f"Expected 'cxr' and 'masks' folders in {input_path}")
 
     print("=" * 60)
-    print("Baseline 1: Standard U-Net (No Edge Enhancement)")
+    print("Baseline 1: Standard U-Net for Binary Lung Segmentation")
     print("=" * 60)
 
     # Setup device
@@ -403,14 +473,14 @@ if __name__ == "__main__":
         mask_dir=str(mask_dir),
         transform=train_augmentation,
         image_size=(512, 512),
-        num_classes=4
+        num_classes=2
     )
     val_test_dataset = ChestXRaySegmentationDataset(
         image_dir=str(image_dir),
         mask_dir=str(mask_dir),
         transform=None,  # No augmentation for validation/test
         image_size=(512, 512),
-        num_classes=4
+        num_classes=2
     )
     print(f"Total samples: {len(train_full_dataset)}")
 
@@ -443,7 +513,7 @@ if __name__ == "__main__":
         test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     # Initialize model
-    model = StandardUNet(in_channels=1, num_classes=4).to(device)
+    model = StandardUNet(in_channels=1, num_classes=2).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Loss and optimizer
@@ -470,25 +540,43 @@ if __name__ == "__main__":
     print("=" * 60)
 
     model.eval()
-    test_metrics = {'dice': 0.0, 'iou': 0.0, 'pixel_acc': 0.0,
-                    'sensitivity': 0.0, 'specificity': 0.0}
-    num_batches = 0
+
+    # Collect all predictions and targets for per-class metrics
+    all_outputs = []
+    all_targets = []
 
     with torch.no_grad():
         for data, target in tqdm(test_loader, desc="Testing"):
             data, target = data.to(device), target.to(device)
             output = model(data)
-            batch_metrics = calculate_metrics(output, target, 4)
-            for k, v in batch_metrics.items():
-                test_metrics[k] += v
-            num_batches += 1
+            all_outputs.append(output)
+            all_targets.append(target)
 
-    for k in test_metrics:
-        test_metrics[k] /= num_batches
+    # Concatenate all batches
+    all_outputs = torch.cat(all_outputs, dim=0)
+    all_targets = torch.cat(all_targets, dim=0)
 
-    print("\nTest Results:")
-    print(f"  Dice Coefficient: {test_metrics['dice']:.4f}")
-    print(f"  IoU Score:        {test_metrics['iou']:.4f}")
-    print(f"  Pixel Accuracy:   {test_metrics['pixel_acc']:.4f}")
-    print(f"  Sensitivity:      {test_metrics['sensitivity']:.4f}")
-    print(f"  Specificity:      {test_metrics['specificity']:.4f}")
+    # Calculate per-class metrics
+    test_metrics = calculate_per_class_metrics(
+        all_outputs, all_targets, num_classes=2)
+
+    print("\nTest Results (Overall):")
+    print(f"  Dice Coefficient: {test_metrics['overall']['dice']:.4f}")
+    print(f"  IoU Score:        {test_metrics['overall']['iou']:.4f}")
+    print(f"  Pixel Accuracy:   {test_metrics['overall']['pixel_acc']:.4f}")
+    print(f"  Sensitivity:      {test_metrics['overall']['sensitivity']:.4f}")
+    print(f"  Specificity:      {test_metrics['overall']['specificity']:.4f}")
+
+    print("\nPer-Class Results:")
+    for class_name, metrics in test_metrics['per_class'].items():
+        print(f"\n{class_name}:")
+        print(f"  Dice: {metrics['dice']:.4f}, IoU: {metrics['iou']:.4f}")
+        print(
+            f"  Sensitivity: {metrics['sensitivity']:.4f}, Specificity: {metrics['specificity']:.4f}")
+
+    # Save results
+    save_dir = Path("./outputs/unet/")
+    save_dir.mkdir(exist_ok=True, parents=True)
+    with open(save_dir / "test_results.json", 'w') as f:
+        json.dump(test_metrics, f, indent=2)
+    print(f"\nResults saved to {save_dir / 'test_results.json'}")

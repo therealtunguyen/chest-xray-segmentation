@@ -15,7 +15,8 @@ from utils import (
     create_gabor_filters,
     load_dataset,
     extract_training_features,
-    calculate_metrics
+    calculate_metrics,
+    calculate_per_class_metrics
 )
 
 
@@ -72,7 +73,7 @@ if __name__ == "__main__":
         raise ValueError(f"Expected 'cxr' and 'masks' folders in {input_path}")
 
     print("=" * 60)
-    print("Baseline 3: Random Forest with Hand-crafted Features")
+    print("Baseline 3: Random Forest for Binary Lung Segmentation")
     print("  - 100 trees")
     print("  - Max depth: 20")
     print("  - Features: HOG, LBP, Gabor")
@@ -80,7 +81,7 @@ if __name__ == "__main__":
 
     # Load dataset
     images, masks = load_dataset(
-        image_dir, mask_dir, image_size=(512, 512), num_classes=4)
+        image_dir, mask_dir, image_size=(512, 512), num_classes=2)
     print(f"Total samples: {len(images)}")
 
     # Train/Val/Test split
@@ -150,7 +151,7 @@ if __name__ == "__main__":
         print(f"  Feature {idx}: {feature_importance[idx]:.4f}")
 
     # Save model
-    save_dir = Path("./output/random_forest/")
+    save_dir = Path("./outputs/random_forest/")
     save_dir.mkdir(exist_ok=True, parents=True)
 
     with open(save_dir / "rf_model.pkl", 'wb') as f:
@@ -174,29 +175,36 @@ if __name__ == "__main__":
     all_pred = np.array(all_pred)
     all_target = np.array(all_target)
 
-    test_metrics = calculate_metrics(all_pred, all_target, num_classes=4)
+    test_metrics = calculate_per_class_metrics(
+        all_pred, all_target, num_classes=2)
 
-    print("\nTest Results:")
-    print(f"  Dice Coefficient: {test_metrics['dice']:.4f}")
-    print(f"  IoU Score:        {test_metrics['iou']:.4f}")
-    print(f"  Pixel Accuracy:   {test_metrics['pixel_acc']:.4f}")
-    print(f"  Sensitivity:      {test_metrics['sensitivity']:.4f}")
-    print(f"  Specificity:      {test_metrics['specificity']:.4f}")
-
-    # Save results
-    with open(save_dir / "test_results.json", 'w') as f:
-        json.dump(test_metrics, f, indent=2)
-    print(f"\nResults saved to {save_dir / 'test_results.json'}")
+    print("\nTest Results (Overall):")
+    print(f"  Dice Coefficient: {test_metrics['overall']['dice']:.4f}")
+    print(f"  IoU Score:        {test_metrics['overall']['iou']:.4f}")
+    print(f"  Pixel Accuracy:   {test_metrics['overall']['pixel_acc']:.4f}")
+    print(f"  Sensitivity:      {test_metrics['overall']['sensitivity']:.4f}")
+    print(f"  Specificity:      {test_metrics['overall']['specificity']:.4f}")
 
     # Per-class analysis
     print("\n" + "=" * 60)
     print("Per-Class Analysis")
     print("=" * 60)
 
-    class_names = ["Background", "Lungs", "Heart", "Clavicles"]
+    for class_name, metrics in test_metrics['per_class'].items():
+        print(f"\n{class_name}:")
+        print(f"  Dice: {metrics['dice']:.4f}, IoU: {metrics['iou']:.4f}")
+        print(
+            f"  Sensitivity: {metrics['sensitivity']:.4f}, Specificity: {metrics['specificity']:.4f}")
+
+    # Save results
+    with open(save_dir / "test_results.json", 'w') as f:
+        json.dump(test_metrics, f, indent=2)
+    print(f"\nResults saved to {save_dir / 'test_results.json'}")
+
+    class_names = ["Background", "Lungs"]
     smooth = 1e-6
 
-    for cls in range(4):
+    for cls in range(2):
         pred_cls = (all_pred == cls).astype(float)
         target_cls = (all_target == cls).astype(float)
 

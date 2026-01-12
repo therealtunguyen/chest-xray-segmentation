@@ -138,8 +138,8 @@ def extract_patch_features(patch: np.ndarray, gabor_filters: List[np.ndarray]) -
 # Dataset Loading
 # ==============================================================================
 def load_dataset(image_dir: Path, mask_dir: Path, image_size: Tuple[int, int] = (512, 512),
-                 num_classes: int = 4) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-    """Load all images and masks"""
+                 num_classes: int = 2) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """Load all images and masks for binary lung segmentation"""
     images = []
     masks = []
 
@@ -167,7 +167,11 @@ def load_dataset(image_dir: Path, mask_dir: Path, image_size: Tuple[int, int] = 
 
         # Normalize image
         image = image.astype(np.float32) / 255.0
-        mask = np.clip(mask, 0, num_classes - 1)
+
+        # Convert grayscale mask (0-255) to binary class labels (0-1)
+        # 0=background, 1=lungs
+        mask_binary = (mask > 127).astype(np.uint8)  # 0 or 1
+        mask = mask_binary
 
         images.append(image)
         masks.append(mask)
@@ -235,8 +239,8 @@ def extract_training_features(images: List[np.ndarray], masks: List[np.ndarray],
 # ==============================================================================
 # Metrics Calculation
 # ==============================================================================
-def calculate_metrics(pred: np.ndarray, target: np.ndarray, num_classes: int = 4) -> Dict[str, float]:
-    """Calculate segmentation metrics"""
+def calculate_metrics(pred: np.ndarray, target: np.ndarray, num_classes: int = 2) -> Dict[str, float]:
+    """Calculate segmentation metrics for binary lung segmentation"""
     # Pixel Accuracy
     pixel_acc = accuracy_score(target.flatten(), pred.flatten())
 
@@ -273,4 +277,68 @@ def calculate_metrics(pred: np.ndarray, target: np.ndarray, num_classes: int = 4
         'pixel_acc': pixel_acc,
         'sensitivity': np.mean(sensitivities),
         'specificity': np.mean(specificities)
+    }
+
+
+def calculate_per_class_metrics(pred: np.ndarray, target: np.ndarray, num_classes: int = 2,
+                                class_names: List[str] = None) -> Dict:
+    """Calculate both overall and per-class segmentation metrics for binary lung segmentation"""
+    from typing import Any
+
+    if class_names is None:
+        class_names = ["Background", "Lungs"]
+
+    # Pixel Accuracy
+    pixel_acc = accuracy_score(target.flatten(), pred.flatten())
+
+    # Per-class metrics storage
+    per_class_metrics = {}
+    dice_scores = []
+    iou_scores = []
+    sensitivities = []
+    specificities = []
+
+    smooth = 1e-6
+
+    for cls in range(num_classes):
+        pred_cls = (pred == cls).astype(float)
+        target_cls = (target == cls).astype(float)
+
+        tp = (pred_cls * target_cls).sum()
+        fp = (pred_cls * (1 - target_cls)).sum()
+        fn = ((1 - pred_cls) * target_cls).sum()
+        tn = ((1 - pred_cls) * (1 - target_cls)).sum()
+
+        dice = (2. * tp + smooth) / (2. * tp + fp + fn + smooth)
+        iou = (tp + smooth) / (tp + fp + fn + smooth)
+        sensitivity = (tp + smooth) / (tp + fn + smooth)
+        specificity = (tn + smooth) / (tn + fp + smooth)
+
+        dice_scores.append(dice)
+        iou_scores.append(iou)
+        sensitivities.append(sensitivity)
+        specificities.append(specificity)
+
+        # Store per-class metrics
+        class_name = class_names[cls] if cls < len(
+            class_names) else f"Class_{cls}"
+        per_class_metrics[class_name] = {
+            'dice': float(dice),
+            'iou': float(iou),
+            'sensitivity': float(sensitivity),
+            'specificity': float(specificity)
+        }
+
+    # Overall metrics
+    overall_metrics = {
+        'dice': float(np.mean(dice_scores)),
+        'iou': float(np.mean(iou_scores)),
+        'pixel_acc': float(pixel_acc),
+        'sensitivity': float(np.mean(sensitivities)),
+        'specificity': float(np.mean(specificities))
+    }
+
+    return {
+        'overall': overall_metrics,
+        'per_class': per_class_metrics
     }

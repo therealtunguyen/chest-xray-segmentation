@@ -16,7 +16,8 @@ from utils import (
     create_gabor_filters,
     load_dataset,
     extract_training_features,
-    calculate_metrics
+    calculate_metrics,
+    calculate_per_class_metrics
 )
 
 
@@ -80,7 +81,7 @@ if __name__ == "__main__":
         raise ValueError(f"Expected 'cxr' and 'masks' folders in {input_path}")
 
     print("=" * 60)
-    print("Baseline 2: SVM with Hand-crafted Features")
+    print("Baseline 2: SVM for Binary Lung Segmentation")
     print("  - HOG (Histogram of Oriented Gradients)")
     print("  - LBP (Local Binary Pattern)")
     print("  - Gabor Filters")
@@ -88,7 +89,7 @@ if __name__ == "__main__":
 
     # Load dataset
     images, masks = load_dataset(
-        image_dir, mask_dir, image_size=(512, 512), num_classes=4)
+        image_dir, mask_dir, image_size=(512, 512), num_classes=2)
     print(f"Total samples: {len(images)}")
 
     # Train/Val/Test split
@@ -181,14 +182,22 @@ if __name__ == "__main__":
     all_pred = np.array(all_pred)
     all_target = np.array(all_target)
 
-    test_metrics = calculate_metrics(all_pred, all_target, num_classes=4)
+    test_metrics = calculate_per_class_metrics(
+        all_pred, all_target, num_classes=2)
 
-    print("\nTest Results:")
-    print(f"  Dice Coefficient: {test_metrics['dice']:.4f}")
-    print(f"  IoU Score:        {test_metrics['iou']:.4f}")
-    print(f"  Pixel Accuracy:   {test_metrics['pixel_acc']:.4f}")
-    print(f"  Sensitivity:      {test_metrics['sensitivity']:.4f}")
-    print(f"  Specificity:      {test_metrics['specificity']:.4f}")
+    print("\nTest Results (Overall):")
+    print(f"  Dice Coefficient: {test_metrics['overall']['dice']:.4f}")
+    print(f"  IoU Score:        {test_metrics['overall']['iou']:.4f}")
+    print(f"  Pixel Accuracy:   {test_metrics['overall']['pixel_acc']:.4f}")
+    print(f"  Sensitivity:      {test_metrics['overall']['sensitivity']:.4f}")
+    print(f"  Specificity:      {test_metrics['overall']['specificity']:.4f}")
+
+    print("\nPer-Class Results:")
+    for class_name, metrics in test_metrics['per_class'].items():
+        print(f"\n{class_name}:")
+        print(f"  Dice: {metrics['dice']:.4f}, IoU: {metrics['iou']:.4f}")
+        print(
+            f"  Sensitivity: {metrics['sensitivity']:.4f}, Specificity: {metrics['specificity']:.4f}")
 
     # Save results
     with open(save_dir / "test_results.json", 'w') as f:
